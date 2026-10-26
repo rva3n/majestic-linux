@@ -6,7 +6,8 @@ export FC_FONTATIONS=0
 
 APPID=271590
 GTA_DIR_NAME="Grand Theft Auto V"
-SETUP_URL="https://cdn.majestic-files.net/launcher/cis/MajesticLauncherSetup.exe"
+RUNNER_REPO="https://github.com/digitalhorizongroup/majestic-rp-linux.git"
+RUNNER_DIR="${MAJESTIC_RUNNER_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/majestic-linux/runner}"
 
 STEAM_ROOT="$HOME/.local/share/Steam"
 if [ ! -d "$STEAM_ROOT/steamapps" ]; then
@@ -15,6 +16,7 @@ fi
 
 PFX="$STEAM_ROOT/steamapps/compatdata/$APPID/pfx"
 LAUNCHER="$PFX/drive_c/users/steamuser/AppData/Local/MajesticLauncher/Majestic Launcher.exe"
+APP_ASAR="$PFX/drive_c/users/steamuser/AppData/Local/MajesticLauncher/resources/app.asar"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/majestic-linux"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/majestic-linux"
 LOCALE_SHIM="$CACHE_DIR/nolcall.so"
@@ -162,8 +164,12 @@ has_patch() {
         grep -qsF 'steam-run.bat' "$PFX/system.reg"
 }
 
+has_patched_launcher() {
+    [ -f "$APP_ASAR" ] && grep -aq 'MAJESTIC_PROTON_UPDATER_DISABLED_V1' "$APP_ASAR"
+}
+
 all_set() {
-    has_powershell && has_launcher && has_patch
+    has_powershell && has_launcher && has_patch && has_patched_launcher
 }
 
 launcher_running() {
@@ -219,20 +225,61 @@ install_powershell() {
 Проверьте, что protontricks не Flatpak-версия, и запустите скрипт снова."
 }
 
-install_launcher() {
-    mkdir -p "$CACHE_DIR"
-    echo "Скачиваю Majestic Launcher..."
-    curl -fL --progress-bar -o "$CACHE_DIR/MajesticLauncherSetup.exe" "$SETUP_URL" ||
-        die "Не удалось скачать установщик лаунчера."
+check_runner_deps() {
+    command -v git >/dev/null 2>&1 ||
+        die "Нужен git. Установите его и запустите скрипт снова."
+    if ! command -v python3 >/dev/null 2>&1 ||
+        ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
+        die "Нужен python3 версии 3.11 или новее."
+    fi
 
-    echo "Запускаю установщик. Пройдите его до конца."
-    protontricks-launch --appid "$APPID" "$CACHE_DIR/MajesticLauncherSetup.exe" ||
-        die "Установщик лаунчера завершился с ошибкой."
-    
-    sleep 5
+    local tool
+    local -a missing=()
+    for tool in asar cmake x86_64-w64-mingw32-g++; do
+        command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+    done
+    if (( ${#missing[@]} )); then
+        die "Не найдены инструменты для сборки патченного лаунчера: ${missing[*]}
+Установите их через пакетный менеджер (asar, cmake, кросс-компилятор mingw-w64) и запустите скрипт снова."
+    fi
+}
+
+ensure_runner() {
+    if [ -n "${MAJESTIC_RUNNER_DIR:-}" ]; then
+        [ -f "$RUNNER_DIR/install-and-run-majestic-proton.sh" ] ||
+            die "В MAJESTIC_RUNNER_DIR нет раннера: $RUNNER_DIR"
+        return 0
+    fi
+
+    if [ -d "$RUNNER_DIR/.git" ]; then
+        echo "Обновляю раннер: $RUNNER_DIR"
+        git -C "$RUNNER_DIR" pull --ff-only --quiet ||
+            echo "Предупреждение: не удалось обновить раннер, использую текущую версию." >&2
+    else
+        echo "Скачиваю раннер в $RUNNER_DIR..."
+        mkdir -p "$(dirname "$RUNNER_DIR")"
+        git clone --quiet "$RUNNER_REPO" "$RUNNER_DIR" ||
+            die "Не удалось скачать раннер: $RUNNER_REPO"
+    fi
+}
+
+install_launcher() {
+    check_runner_deps
+    ensure_runner
+
+    if has_launcher && ! has_patched_launcher; then
+        echo "Удаляю непатченный лаунчер перед установкой патченного..."
+        kill_launcher
+        rm -rf -- "$(dirname "$LAUNCHER")"
+    fi
+
+    echo "Устанавливаю патченный лаунчер через раннер digitalhorizongroup. Пройдите установщик до конца."
+    (cd "$RUNNER_DIR" && python3 -m majestic_linux install) ||
+        die "Раннер не смог установить патченный лаунчер."
 
     has_launcher || die "Лаунчер не найден после установки:
 $LAUNCHER"
+    has_patched_launcher || die "Лаунчер установлен, но не пропатчен. Смотрите вывод раннера выше."
 }
 
 kill_launcher() {
@@ -520,7 +567,7 @@ main() {
 
     ensure_protontricks
     has_powershell || install_powershell
-    has_launcher || install_launcher
+    has_patched_launcher || install_launcher
     has_patch || patch_prefix
     ensure_optional_deps
     has_emoji || install_emoji
